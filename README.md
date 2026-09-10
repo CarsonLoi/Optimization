@@ -66,11 +66,11 @@ uv run shift-optimizer --help
 
 ### 配置 Excel（默认 `data/config.xlsx`，第一个工作表）
 
-**一张台一行**（master 清单）。列名不分大小写、空格/大小写自动规整。
+master 清单，一般一张台一行（同名多行见下方）。列名不分大小写、空格/大小写自动规整。
 
 | 列 | 必填 | 说明 |
 |---|---|---|
-| `table` | ✅ | 台名/编号，唯一 |
+| `table` | ✅ | 台名/编号（同名多行需配不重叠的日期区间，见下） |
 | `pod` | ✅ | 所属 pod 名，pod 大小不限（不必是 4） |
 | `preferred_open_hours` | 可选 | 人工偏好时长，必须是 `24/16/8/0`，可逐行留空。别名 `pref` / `preferred_hours` / `preference` / `open_hours` |
 | `theo_per_open_hour` | 可选 | 每营业小时理论赢数 (Theo)，**历史数据**。别名 `theo` / `theo_per_hour`。留空 = 新台无历史 |
@@ -80,6 +80,15 @@ uv run shift-optimizer --help
 
 **按天可用**：求解某一天时，只纳入 `available_from ≤ 当天 ≤ available_to` 的台。
 完全不写这两列 → 所有台每天都在（且需求 Excel 的 `day` 不必是日期）。
+
+**同名台可以有多行**（换 pod、刷新历史业绩、停用后再启用……），只要各行的日期
+区间【不重叠】——每一天代码会挑出当天生效的那一行。例：
+| table | pod | theo_per_open_hour | available_from | available_to |
+|---|---|---|---|---|
+| BJ-05 | Pit-A | 210 | | 2026-06-30 |
+| BJ-05 | Pit-B | 240 | 2026-07-01 | |
+
+不填日期列时，同名台出现多行会报错（无法区分）。
 
 **评分**：`score = 0.8 × Theo_归一化 + 0.2 × Hands_归一化`（min–max 到 0..1），据此排名。
 - 归一化只在**当天有历史的台**之间做；
@@ -127,7 +136,7 @@ uv run shift-optimizer --help
 
 ```bash
 uv sync --extra dev
-uv run pytest                # 24 个测试；test_model.py 需要 ortools，缺则自动跳过
+uv run pytest                # 27 个测试；test_model.py 需要 ortools，缺则自动跳过
 ```
 
 ## 目录

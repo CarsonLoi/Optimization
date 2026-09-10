@@ -60,10 +60,48 @@ def test_load_config_rejects_bad_pref(tmp_path):
         load_config(_write(df, tmp_path / 'c.xlsx', 'tables'))
 
 
-def test_load_config_rejects_duplicate_table(tmp_path):
+def test_load_config_rejects_duplicate_table_without_window(tmp_path):
     df = pd.DataFrame({'table': ['T1', 'T1'], 'pod': ['P', 'P']})
     with pytest.raises(ValueError):
         load_config(_write(df, tmp_path / 'c.xlsx', 'tables'))
+
+
+def test_load_config_allows_same_table_non_overlapping_periods(tmp_path):
+    # T05 换 pod：P1 到 2026-06-30，之后 P2
+    df = pd.DataFrame({
+        'table': ['T05', 'T05'], 'pod': ['P1', 'P2'],
+        'available_from': [None, pd.Timestamp('2026-07-01')],
+        'available_to':   [pd.Timestamp('2026-06-30'), None],
+    })
+    fleet = load_config(_write(df, tmp_path / 'c.xlsx', 'tables'))
+    assert fleet.num_tables == 1
+    assert len(fleet.tables) == 2
+
+
+def test_load_config_rejects_same_table_overlapping_periods(tmp_path):
+    df = pd.DataFrame({
+        'table': ['T05', 'T05'], 'pod': ['P1', 'P2'],
+        'available_from': [None, pd.Timestamp('2026-06-15')],
+        'available_to':   [pd.Timestamp('2026-06-30'), None],
+    })
+    with pytest.raises(ValueError):
+        load_config(_write(df, tmp_path / 'c.xlsx', 'tables'))
+
+
+def test_build_day_fleet_picks_active_period(tmp_path):
+    df = pd.DataFrame({
+        'table': ['T05', 'T05'], 'pod': ['P1', 'P2'],
+        'theo_per_open_hour': [200, 200], 'patron_hands_per_hour': [50, 50],
+        'available_from': [None, pd.Timestamp('2026-07-01')],
+        'available_to':   [pd.Timestamp('2026-06-30'), None],
+    })
+    fleet = load_config(_write(df, tmp_path / 'c.xlsx', 'tables'))
+
+    jun = load_demand(_write(_demand_row('2026-06-20'), tmp_path / 'd1.xlsx', 'demand'))[0]
+    aug = load_demand(_write(_demand_row('2026-08-20'), tmp_path / 'd2.xlsx', 'demand'))[0]
+
+    assert build_day_fleet(fleet, jun).pod == ['P1']
+    assert build_day_fleet(fleet, aug).pod == ['P2']
 
 
 # ---------------------------------------------------------------- demand

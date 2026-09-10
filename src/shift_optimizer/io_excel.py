@@ -61,12 +61,13 @@ class TableInfo:
 
 @dataclass
 class FleetConfig:
-    tables: list[TableInfo]
+    tables: list[TableInfo]                  # 所有行（同名台可有多行，日期区间不重叠）
     has_availability_window: bool = False   # config 里是否出现了 available_from/to 列
 
     @property
     def num_tables(self) -> int:
-        return len(self.tables)
+        """不同台的数量（按名字去重）。"""
+        return len({t.name for t in self.tables})
 
 
 @dataclass
@@ -130,6 +131,13 @@ def _to_date(raw) -> date | None:
     return ts.date()
 
 
+def _periods_overlap(a: 'TableInfo', b: 'TableInfo') -> bool:
+    """两行的 [available_from, available_to] 闭区间是否相交（None = 无界）。"""
+    a_after_b_start = a.available_to is None or b.available_from is None or a.available_to >= b.available_from
+    b_after_a_start = b.available_to is None or a.available_from is None or b.available_to >= a.available_from
+    return a_after_b_start and b_after_a_start
+
+
 def load_config(path: str) -> FleetConfig:
     df = pd.read_excel(path, sheet_name=0)
     df.columns = [_norm(c) for c in df.columns]
@@ -147,9 +155,7 @@ def load_config(path: str) -> FleetConfig:
 
     df = df[df['table'].notna()].copy()
     names = [str(v).strip() for v in df['table']]
-    if len(set(names)) != len(names):
-        dupes = sorted({n for n in names if names.count(n) > 1})
-        raise ValueError(f"配置 Excel 里有重复的 table 名: {dupes}")
+    has_window = bool(from_col or to_col)
 
     def _opt_pref(raw):
         if raw is None or pd.isna(raw):
@@ -174,7 +180,27 @@ def load_config(path: str) -> FleetConfig:
             available_to=_to_date(row[to_col]) if to_col else None,
         ))
 
-    return FleetConfig(tables=tables, has_availability_window=bool(from_col or to_col))
+    # 同名台可以有多行（换 pod / 刷新历史 / 停用再启用），但日期区间不能重叠。
+    by_name: dict[str, list[TableInfo]] = {}
+    for t in tables:
+        by_name.setdefault(t.name, []).append(t)
+    for name, rows in by_name.items():
+        if len(rows) == 1:
+            continue
+        if not has_window:
+            raise ValueError(
+                f"table '{name}' 出现多行，但 config 没有 available_from / available_to 列，"
+                f"无法区分。要么删掉重复行，要么为每行填【不重叠】的日期区间。"
+            )
+        for a, b in ((rows[i], rows[j]) for i in range(len(rows)) for j in range(i + 1, len(rows))):
+            if _periods_overlap(a, b):
+                raise ValueError(
+                    f"table '{name}' 有两行的可用日期区间重叠："
+                    f"[{a.available_from} .. {a.available_to}] 和 "
+                    f"[{b.available_from} .. {b.available_to}]"
+                )
+
+    return FleetConfig(tables=tables, has_availability_window=has_window)
 
 
 def load_demand(path: str) -> list[DayDemand]:
@@ -228,6 +254,14 @@ def build_day_fleet(fleet: FleetConfig, day: DayDemand) -> DayFleet:
         )
 
     avail = [t for t in fleet.tables if t.available_on(day.the_date)]
+
+    # 同名台按日期区间已保证不重叠；防御性地再确认当天每个名字只命中一行
+    seen: dict[str, TableInfo] = {}
+    for t in avail:
+        if t.name in seen:
+            raise ValueError(f"{day.label}: table '{t.name}' 当天匹配到多行，请检查日期区间")
+        seen[t.name] = t
+    avail = list(seen.values())
 
     dayf = DayFleet(
         names=[t.name for t in avail],
