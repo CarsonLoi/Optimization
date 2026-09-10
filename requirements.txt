@@ -1,0 +1,8 @@
+# pip install -r requirements.txt
+# 注意: ortools 9.15 在部分 Windows 环境加载失败 (WinError 127) 且会把 numpy/pandas 升到 2.x/3.x。
+#       建议装 9.10：  pip install --no-deps "ortools==9.10.4067"
+ortools==9.10.4067
+pandas>=1.5,<2.2
+numpy>=1.24,<2
+openpyxl>=3.1
+pytest>=7          # 仅测试用

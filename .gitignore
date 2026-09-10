@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# 生成的输出（示例输入在 data/ 里，保留）
+/schedule_output.xlsx
+/outputs/
+~$*.xlsx
+
+# 编辑器 / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code 本地设置
+.claude/settings.local.json
