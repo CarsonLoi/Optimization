@@ -180,26 +180,41 @@ def load_config(path: str) -> FleetConfig:
             available_to=_to_date(row[to_col]) if to_col else None,
         ))
 
-    # 同名台可以有多行（换 pod / 刷新历史 / 停用再启用），但日期区间不能重叠。
+    # 同名台的处理：
+    #   * 只有 1 行 -> 直接用
+    #   * 多行且带【不重叠】的日期区间 -> 全部保留，每天挑当天生效的那行
+    #   * 多行但没日期列 / 日期区间重叠 -> 只保留【最新】的一行（其余丢弃并打印提示）
+    #     "最新" = available_from 最大者；都没填则取 Excel 里靠后的那行
     by_name: dict[str, list[TableInfo]] = {}
-    for t in tables:
-        by_name.setdefault(t.name, []).append(t)
-    for name, rows in by_name.items():
-        if len(rows) == 1:
-            continue
-        if not has_window:
-            raise ValueError(
-                f"table '{name}' 出现多行，但 config 没有 available_from / available_to 列，"
-                f"无法区分。要么删掉重复行，要么为每行填【不重叠】的日期区间。"
-            )
-        for a, b in ((rows[i], rows[j]) for i in range(len(rows)) for j in range(i + 1, len(rows))):
-            if _periods_overlap(a, b):
-                raise ValueError(
-                    f"table '{name}' 有两行的可用日期区间重叠："
-                    f"[{a.available_from} .. {a.available_to}] 和 "
-                    f"[{b.available_from} .. {b.available_to}]"
-                )
+    for order, t in enumerate(tables):
+        by_name.setdefault(t.name, []).append((order, t))
 
+    kept: list[TableInfo] = []
+    for name, indexed in by_name.items():
+        rows = [t for _, t in indexed]
+        if len(rows) == 1:
+            kept.append(rows[0])
+            continue
+
+        clean_periods = has_window and not any(
+            _periods_overlap(rows[i], rows[j])
+            for i in range(len(rows)) for j in range(i + 1, len(rows))
+        )
+        if clean_periods:
+            kept.extend(rows)
+            continue
+
+        latest_order, latest = max(
+            indexed, key=lambda ot: (ot[1].available_from or date.min, ot[0])
+        )
+        why = "没有 available_from/to 列" if not has_window else "日期区间重叠"
+        print(f"  [提示] table '{name}' 有 {len(rows)} 行（{why}）——只用最新的一行"
+              f"（pod={latest.pod}"
+              + (f", available_from={latest.available_from}" if latest.available_from else "")
+              + "）。")
+        kept.append(latest)
+
+    tables = sorted(kept, key=lambda t: names.index(t.name))
     return FleetConfig(tables=tables, has_availability_window=has_window)
 
 

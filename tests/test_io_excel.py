@@ -60,10 +60,24 @@ def test_load_config_rejects_bad_pref(tmp_path):
         load_config(_write(df, tmp_path / 'c.xlsx', 'tables'))
 
 
-def test_load_config_rejects_duplicate_table_without_window(tmp_path):
-    df = pd.DataFrame({'table': ['T1', 'T1'], 'pod': ['P', 'P']})
-    with pytest.raises(ValueError):
-        load_config(_write(df, tmp_path / 'c.xlsx', 'tables'))
+def test_load_config_dedupes_duplicate_without_window(tmp_path):
+    # 没有日期列 -> 只保留靠后的那行
+    df = pd.DataFrame({'table': ['T1', 'T1'], 'pod': ['OLD', 'NEW']})
+    fleet = load_config(_write(df, tmp_path / 'c.xlsx', 'tables'))
+    assert fleet.num_tables == 1
+    assert len(fleet.tables) == 1
+    assert fleet.tables[0].pod == 'NEW'
+
+
+def test_load_config_dedupes_overlapping_periods_to_latest(tmp_path):
+    df = pd.DataFrame({
+        'table': ['T5', 'T5'], 'pod': ['OLD', 'NEW'],
+        'available_from': [None, pd.Timestamp('2026-06-15')],
+        'available_to':   [pd.Timestamp('2026-06-30'), None],
+    })
+    fleet = load_config(_write(df, tmp_path / 'c.xlsx', 'tables'))
+    assert len(fleet.tables) == 1
+    assert fleet.tables[0].pod == 'NEW'          # available_from 更晚
 
 
 def test_load_config_allows_same_table_non_overlapping_periods(tmp_path):
@@ -76,16 +90,6 @@ def test_load_config_allows_same_table_non_overlapping_periods(tmp_path):
     fleet = load_config(_write(df, tmp_path / 'c.xlsx', 'tables'))
     assert fleet.num_tables == 1
     assert len(fleet.tables) == 2
-
-
-def test_load_config_rejects_same_table_overlapping_periods(tmp_path):
-    df = pd.DataFrame({
-        'table': ['T05', 'T05'], 'pod': ['P1', 'P2'],
-        'available_from': [None, pd.Timestamp('2026-06-15')],
-        'available_to':   [pd.Timestamp('2026-06-30'), None],
-    })
-    with pytest.raises(ValueError):
-        load_config(_write(df, tmp_path / 'c.xlsx', 'tables'))
 
 
 def test_build_day_fleet_picks_active_period(tmp_path):
