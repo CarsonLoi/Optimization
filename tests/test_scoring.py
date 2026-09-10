@@ -10,7 +10,6 @@ def test_normalize_all_equal_returns_zeros():
 
 
 def test_performance_score_theo_dominates():
-    # 台0 Theo 高 Hands 低；台1 Theo 低 Hands 高。Theo 权重 0.8 -> 台0 评分更高。
     score = performance_score(theo=[300, 100], hands=[10, 90])
     assert score[0] > score[1]
 
@@ -18,6 +17,18 @@ def test_performance_score_theo_dominates():
 def test_performance_score_in_unit_range():
     score = performance_score(theo=[50, 120, 400, 90], hands=[30, 60, 20, 75])
     assert all(0.0 <= s <= 1.0 for s in score)
+
+
+def test_performance_score_missing_gets_median_of_known():
+    # 三张有历史 (score 会是 0, 0.5, 1 附近)，第四张无历史 -> 拿中位数
+    score = performance_score(theo=[100, 200, 300, None], hands=[100, 200, 300, None])
+    known = sorted(score[:3])
+    assert known[0] <= score[3] <= known[2]
+    assert abs(score[3] - known[1]) < 1e-9          # 恰好是中位数
+
+
+def test_performance_score_all_missing_returns_zeros():
+    assert performance_score(theo=[None, None], hands=[None, None]) == [0.0, 0.0]
 
 
 def test_ranking_orders_by_score_desc():

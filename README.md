@@ -54,36 +54,43 @@ python -m shift_optimizer --help
 
 ### 配置 Excel（默认 `data/config.xlsx`，第一个工作表）
 
-列名不分大小写、空格/大小写自动规整。
+**一张台一行**（master 清单）。列名不分大小写、空格/大小写自动规整。
 
 | 列 | 必填 | 说明 |
 |---|---|---|
 | `table` | ✅ | 台名/编号，唯一 |
 | `pod` | ✅ | 所属 pod 名，pod 大小不限（不必是 4） |
 | `preferred_open_hours` | 可选 | 人工偏好时长，必须是 `24/16/8/0`，可逐行留空。别名 `pref` / `preferred_hours` / `preference` / `open_hours` |
-| `theo_per_open_hour` | 可选 | 每营业小时理论赢数 (Theo)。别名 `theo` / `theo_per_hour`。缺省 0 |
-| `patron_hands_per_hour` | 可选 | 每小时客人手数。别名 `hands` / `patron_hands`。缺省 0 |
+| `theo_per_open_hour` | 可选 | 每营业小时理论赢数 (Theo)，**历史数据**。别名 `theo` / `theo_per_hour`。留空 = 新台无历史 |
+| `patron_hands_per_hour` | 可选 | 每小时客人手数，**历史数据**。别名 `hands` / `patron_hands`。留空 = 新台无历史 |
+| `available_from` | 可选 | 该台生效日期（含）。别名 `start_date` / `valid_from`。留空 = 一直有效 |
+| `available_to` | 可选 | 该台失效日期（含）。别名 `end_date` / `valid_to`。留空 = 一直有效 |
 
-`score = 0.8 × Theo_归一化 + 0.2 × Hands_归一化`（归一化 = min–max 到 0..1），据此排名。
-若两列都不给，`score` 全 0，退化成"只按覆盖 + 人工偏好"。
+**按天可用**：求解某一天时，只纳入 `available_from ≤ 当天 ≤ available_to` 的台。
+完全不写这两列 → 所有台每天都在（且需求 Excel 的 `day` 不必是日期）。
+
+**评分**：`score = 0.8 × Theo_归一化 + 0.2 × Hands_归一化`（min–max 到 0..1），据此排名。
+- 归一化只在**当天有历史的台**之间做；
+- **新台**（Theo/Hands 留空）→ 评分取当天有历史台评分的**中位数**（不因此被压到短班次，也不占高价值台的位置）；
+- 当天没有任何台有历史 → 评分全 0，退化成"只按覆盖 + 人工偏好"。
 
 ### 需求 Excel（默认 `data/demand.xlsx`，第一个工作表）
 
 | 列 | 必填 | 说明 |
 |---|---|---|
-| `day` | ✅ | 当天标签（日期或文字），唯一 |
+| `day` | ✅ | 当天标签，唯一。**用了 config 的 available_from/to 时必须是日期**（如 `2026-09-01`） |
 | 24 个小时列 | ✅ | 按顺序对应下标 0..23（下标 0 = 07:00）。列名随意，只要正好 24 个 |
 | `capacity` | 可选 | 当天"同时开台数"上限（硬约束）。留空 = 不限制 |
 
-每一天独立求解一次。
+每一天独立求解一次，用当天可用的台。
 
 ## 输出 Excel（`--out`，默认 `schedule_output.xlsx`）
 
 | 工作表 | 内容 |
 |---|---|
-| `summary` | 每天一行：status、objective、总缺口、总过剩、实现 Theo、实现 hands |
-| `fleet` | 台清单：pod、偏好、Theo、hands、score、rank |
-| `schedules` | 长表：`day, table, pod, rank, score, preferred_open_hours, shift, shift_open_hours` |
+| `summary` | 每天一行：status、可用台数、capacity、objective、总缺口、总过剩、实现 Theo、实现 hands |
+| `fleet` | master 台清单：pod、偏好、Theo、hands、has_history、available_from/to |
+| `schedules` | 长表：`day, table, pod, rank, score, has_history, preferred_open_hours, shift, shift_open_hours` |
 | `coverage` | 逐日逐小时：`demand, capacity, tables_open, shortage, surplus` |
 
 ## 权重与优先级
@@ -108,7 +115,7 @@ python -m shift_optimizer --help
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # 19 个测试；test_model.py 需要 ortools，缺则自动跳过
+pytest                       # 24 个测试；test_model.py 需要 ortools，缺则自动跳过
 ```
 
 ## 目录
@@ -117,7 +124,8 @@ pytest                       # 19 个测试；test_model.py 需要 ortools，缺
 src/shift_optimizer/
   config.py     班次目录 / 时长类别 / 权重
   scoring.py    业绩指标 -> 0..1 综合评分 + 排名
-  io_excel.py   读配置/需求、写结果；FleetConfig / DayDemand / DayResult
+  io_excel.py   读配置/需求、写结果、按天组装可用台
+                TableInfo / FleetConfig / DayDemand / DayFleet / DayResult / build_day_fleet
   model.py      CP-SAT 建模 + 逐日求解；pod_penalty_schedule
   cli.py        命令行入口
 scripts/make_templates.py   生成示例 Excel

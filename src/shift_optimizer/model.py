@@ -1,5 +1,5 @@
 """
-建模 + 求解（每天独立一次）。
+建模 + 求解（每天独立一次，只用当天【可用】的台）。
 
 目标函数（最小化）:
     WEIGHT_SHORTAGE * Σ 每小时缺口
@@ -18,6 +18,7 @@
 覆盖需求 / pod 规则 决定了整体上需要多少张台跑 24h、多少张跑 16h……
 在这些约束下，  - Σ score[台] * 开机小时数  这一项会把"开机小时数"尽量
 堆到 score 最高的台上（排序不等式）——于是高业绩的台优先拿到长班次。
+新台无历史 -> score 取当天有历史台的中位数（既不吃亏也不占便宜）。
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from .config import (
     PERF_WEIGHT, PREF_WEIGHT, SHIFT_CATEGORY, SHIFT_CODES, SHIFT_COVERS_HOUR,
     SHIFT_OPEN_HOURS, WEIGHT_SHORTAGE, WEIGHT_SURPLUS,
 )
-from .io_excel import DayDemand, DayResult, FleetConfig
+from .io_excel import DayDemand, DayFleet, DayResult
 
 
 def pod_penalty_schedule(pod_size: int) -> list[int]:
@@ -50,15 +51,20 @@ def pod_penalty_schedule(pod_size: int) -> list[int]:
     return sched
 
 
-def solve_day(day: DayDemand, fleet: FleetConfig,
+def solve_day(day: DayDemand, dayf: DayFleet,
               time_limit_s: float,
               perf_weight: float = PERF_WEIGHT,
               pref_weight: float = PREF_WEIGHT) -> DayResult:
     from ortools.sat.python import cp_model
 
-    T = fleet.num_tables
-    capacity = fleet.num_tables if day.capacity is None else day.capacity
+    T = dayf.num_tables
+    capacity = T if day.capacity is None else day.capacity
     demand = day.demand
+
+    result = DayResult(label=day.label, status='NO_TABLES', capacity=capacity,
+                       num_available=T)
+    if T == 0:
+        return result
 
     model = cp_model.CpModel()
 
@@ -68,13 +74,12 @@ def solve_day(day: DayDemand, fleet: FleetConfig,
     for t in range(T):
         model.AddExactlyOne(assign[t, s] for s in range(NUM_SHIFTS))
 
-    # 每张台的开机小时数（线性表达式，0..24）
     open_hours = {t: sum(assign[t, s] * SHIFT_OPEN_HOURS[s] for s in range(NUM_SHIFTS))
                   for t in range(T)}
 
     # ---- 约束 A: pod 整齐度 ----
     pod_penalty_terms = []
-    for pod_name, members in fleet.pods.items():
+    for pod_name, members in dayf.pods.items():
         size = len(members)
         sched = pod_penalty_schedule(size)
         max_pen = max(sched) if sched else 0
@@ -84,7 +89,7 @@ def solve_day(day: DayDemand, fleet: FleetConfig,
             model.Add(count == sum(assign[t, s] for t in members))
 
             pen = model.NewIntVar(0, max_pen, f'pod_{pod_name}_{SHIFT_CODES[s]}_pen')
-            model.AddElement(count, sched, pen)              # pen == sched[count]
+            model.AddElement(count, sched, pen)
             pod_penalty_terms.append(pen)
 
             used = model.NewBoolVar(f'pod_{pod_name}_uses_{SHIFT_CODES[s]}')
@@ -96,9 +101,9 @@ def solve_day(day: DayDemand, fleet: FleetConfig,
     # ---- 约束 B: 人工偏好营业时长（仅对填了 pref 的台）----
     pref_penalty_terms = []                                  # list[(charge_bool, coeff)]
     for t in range(T):
-        if fleet.pref[t] is None:
+        if dayf.pref[t] is None:
             continue
-        pref = fleet.pref[t]
+        pref = dayf.pref[t]
         is_cat = [model.NewBoolVar(f't{t}_cat{c}') for c in range(4)]
         for c in range(4):
             model.Add(is_cat[c] == sum(assign[t, s] for s in range(NUM_SHIFTS)
@@ -106,7 +111,7 @@ def solve_day(day: DayDemand, fleet: FleetConfig,
         model.AddExactlyOne(is_cat)                          # 逻辑上多余，留作自检
         for c in range(4):
             charge = model.NewBoolVar(f't{t}_devcharge_cat{c}')
-            model.AddBoolOr([is_cat[c], charge])             # 该类别没被选中 -> charge 被迫 = 1
+            model.AddBoolOr([is_cat[c], charge])
             pref_penalty_terms.append((charge, PENALTY_BY_PREF_AND_CATEGORY[pref][c]))
 
     # ---- 约束 C: 逐小时覆盖 + capacity ----
@@ -114,7 +119,7 @@ def solve_day(day: DayDemand, fleet: FleetConfig,
     for h in range(HOURS_PER_DAY):
         tables_open = sum(assign[t, s] * int(SHIFT_COVERS_HOUR[s, h])
                           for t in range(T) for s in range(NUM_SHIFTS))
-        model.Add(tables_open <= capacity)                   # 硬约束
+        model.Add(tables_open <= capacity)
 
         shortage = model.NewIntVar(0, int(demand[h]), f'short_h{h}')
         surplus = model.NewIntVar(0, T, f'surp_h{h}')
@@ -122,10 +127,8 @@ def solve_day(day: DayDemand, fleet: FleetConfig,
         hourly_shortage.append(shortage)
         hourly_surplus.append(surplus)
 
-    # ---- 业绩奖励项 ----
-    perf_reward = sum(fleet.score[t] * open_hours[t] for t in range(T))   # float 系数
+    perf_reward = sum(dayf.score[t] * open_hours[t] for t in range(T))
 
-    # ---- 目标函数 ----
     model.Minimize(
         WEIGHT_SHORTAGE * sum(hourly_shortage)
         + WEIGHT_SURPLUS * sum(hourly_surplus)
@@ -138,20 +141,28 @@ def solve_day(day: DayDemand, fleet: FleetConfig,
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = time_limit_s
     solver.parameters.random_seed = 42
-    solver.parameters.num_search_workers = 8   # 固定 seed + 固定 worker 数 -> 结果可复现
+    solver.parameters.num_search_workers = 8
     status = solver.Solve(model)
 
-    result = DayResult(label=day.label, status=solver.StatusName(status), capacity=capacity)
+    result.status = solver.StatusName(status)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return result
 
     result.objective = round(solver.ObjectiveValue(), 2)
     chosen = {t: s for t in range(T) for s in range(NUM_SHIFTS)
               if solver.BooleanValue(assign[t, s])}
-    result.schedule = {t: SHIFT_CODES[s] for t, s in chosen.items()}
-    result.realized_theo = round(sum(fleet.theo[t] * SHIFT_OPEN_HOURS[s]
+    result.schedule = {dayf.names[t]: SHIFT_CODES[s] for t, s in chosen.items()}
+    result.schedule_rows = [{
+        'table': dayf.names[t], 'pod': dayf.pod[t],
+        'rank': dayf.rank[t], 'score': round(dayf.score[t], 4),
+        'has_history': dayf.has_history[t],
+        'preferred_open_hours': dayf.pref[t],
+        'shift': SHIFT_CODES[s], 'shift_open_hours': SHIFT_OPEN_HOURS[s],
+    } for t, s in sorted(chosen.items(), key=lambda kv: dayf.rank[kv[0]])]
+
+    result.realized_theo = round(sum((dayf.theo[t] or 0.0) * SHIFT_OPEN_HOURS[s]
                                      for t, s in chosen.items()), 1)
-    result.realized_hands = round(sum(fleet.hands[t] * SHIFT_OPEN_HOURS[s]
+    result.realized_hands = round(sum((dayf.hands[t] or 0.0) * SHIFT_OPEN_HOURS[s]
                                       for t, s in chosen.items()), 1)
 
     coverage = []
