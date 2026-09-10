@@ -9,9 +9,9 @@ description = "Hourly shift assignment for casino tables (OR-Tools CP-SAT)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "ortools>=9.8,<9.12",
-    "pandas>=1.5,<2.2",
-    "numpy>=1.24,<2",
+    "ortools>=9.14",
+    "pandas>=2.0",
+    "numpy>=1.26",
     "openpyxl>=3.1",
 ]
 

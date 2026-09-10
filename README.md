@@ -10,27 +10,39 @@
 
 ## 安装
 
+用 [uv](https://docs.astral.sh/uv/)（推荐）：
+
 ```bash
-pip install -e .
-# 或： pip install -r requirements.txt
+uv sync --extra dev        # 创建 .venv，按 uv.lock 装好 ortools / pandas / numpy / pytest
+uv run shift-optimizer     # 在 .venv 里跑；或 uv run pytest / uv run python ...
 ```
 
-> ⚠️ **ortools 版本**：`pip install ortools` 会装 9.15，在部分 Windows 环境
-> 加载失败（`WinError 127`），且把 numpy/pandas 升到 2.x/3.x。请用：
-> `pip install --no-deps "ortools==9.10.4067"`
+或用 pip：
 
-依赖：`ortools==9.10.4067`、`pandas<2.2`、`numpy<2`、`openpyxl`。Python ≥ 3.10。
+```bash
+python -m venv .venv && .venv\Scripts\activate      # Windows
+pip install -e ".[dev]"                              # 或 pip install -r requirements.txt
+```
+
+依赖（见 `pyproject.toml` / `uv.lock`）：`ortools>=9.14`、`pandas>=2`、`numpy>=1.26`、
+`openpyxl`。Python ≥ 3.10。
+
+> ⚠️ 在被污染的 conda base 环境里，`ortools 9.15` 曾出现 `WinError 127` 加载失败
+> （site-packages 里有旧的 protobuf/abseil DLL 冲突）。**独立的 venv（uv 或 python -m venv）里 9.15 正常。**
+> 所以别把这个项目装进 conda base，用 `uv sync` 建的隔离环境。
 
 ## 用法
 
 ```bash
-python scripts/make_templates.py          # 生成 data/config.xlsx 和 data/demand.xlsx 示例
+uv run python scripts/make_templates.py    # 生成 data/config.xlsx 和 data/demand.xlsx 示例
 
-shift-optimizer                            # 用默认路径跑
-shift-optimizer --config data/config.xlsx --demand data/demand.xlsx --out out.xlsx
-shift-optimizer --perf-weight 0.4 --pref-weight 0   # 完全按业绩、忽略人工偏好
-python -m shift_optimizer --help
+uv run shift-optimizer                      # 用默认路径跑
+uv run shift-optimizer --config data/config.xlsx --demand data/demand.xlsx --out out.xlsx
+uv run shift-optimizer --perf-weight 0.4 --pref-weight 0   # 完全按业绩、忽略人工偏好
+uv run shift-optimizer --help
 ```
+
+（激活了 venv 的话，直接 `shift-optimizer ...` / `python -m shift_optimizer ...` 也行。）
 
 ## 时间约定
 
@@ -114,8 +126,8 @@ python -m shift_optimizer --help
 ## 开发
 
 ```bash
-pip install -e ".[dev]"
-pytest                       # 24 个测试；test_model.py 需要 ortools，缺则自动跳过
+uv sync --extra dev
+uv run pytest                # 24 个测试；test_model.py 需要 ortools，缺则自动跳过
 ```
 
 ## 目录
