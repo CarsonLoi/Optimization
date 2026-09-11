@@ -39,6 +39,7 @@ uv run python scripts/make_templates.py    # 生成 data/config.xlsx 和 data/de
 uv run shift-optimizer                      # 用默认路径跑
 uv run shift-optimizer --config data/config.xlsx --demand data/demand.xlsx --out out.xlsx
 uv run shift-optimizer --perf-weight 0.4 --pref-weight 0   # 完全按业绩、忽略人工偏好
+uv run shift-optimizer --window-weight 0                    # 同时长内的窗口只按覆盖挑，不看评分
 uv run shift-optimizer --help
 ```
 
@@ -100,6 +101,13 @@ master 清单，一般一张台一行（同名多行见下方）。列名不分�
 - **新台**（Theo/Hands 留空）→ 评分取当天有历史台评分的**中位数**（不因此被压到短班次，也不占高价值台的位置）；
 - 当天没有任何台有历史 → 评分全 0，退化成"只按覆盖 + 人工偏好"。
 
+**评分决定两层顺序**：
+1. **时长类别**（24h > 16h > 8h > 关闭）：覆盖需求 + pod 规则先定出"整体要几张 24h、几张 16h……"，
+   score 高的台优先拿到长的那类。
+2. **同时长内选哪个窗口**（16h 的 C/E、8h 的 H/L/J/N）：当覆盖约束允许"同时长换哪个窗口结果一样"时，
+   把当天**覆盖需求更多**的那个窗口（`window_desirability`，见下方 `schedules` 表）让给 score 更高的台；
+   覆盖不是真的无所谓的时候，覆盖仍然优先。设 `--window-weight 0` 关掉这层，退回旧版"同时长内純按覆盖挑"。
+
 ### 需求 Excel（默认 `data/demand.xlsx`，第一个工作表）
 
 | 列 | 必填 | 说明 |
@@ -116,7 +124,7 @@ master 清单，一般一张台一行（同名多行见下方）。列名不分�
 |---|---|
 | `summary` | 每天一行：status、可用台数、capacity、objective、总缺口、总过剩、实现 Theo、实现 hands |
 | `fleet` | master 台清单：pod、偏好、Theo、hands、has_history、available_from/to |
-| `schedules` | 长表：`day, table, pod, rank, score, has_history, preferred_open_hours, shift, shift_open_hours` |
+| `schedules` | 长表：`day, table, pod, rank, score, has_history, preferred_open_hours, shift, shift_open_hours, window_desirability` |
 | `coverage` | 逐日逐小时：`demand, capacity, tables_open, shortage, surplus` |
 
 ## 权重与优先级
@@ -124,24 +132,31 @@ master 清单，一般一张台一行（同名多行见下方）。列名不分�
 目标函数（最小化）：
 
 ```
-2.5·Σ缺口  +  1·Σ过剩  +  Σ pod拆分罚分  +  PREF_WEIGHT·Σ偏好偏离  −  PERF_WEIGHT·Σ(score·开机小时)
+2.5·Σ缺口  +  1·Σ过剩  +  Σ pod拆分罚分  +  PREF_WEIGHT·Σ偏好偏离
+  −  PERF_WEIGHT·Σ(score·开机小时)  −  WINDOW_WEIGHT·Σ(score·同时长窗口吸引力)
 ```
 
 | 常量 | 默认 | 作用 |
 |---|---|---|
 | `WEIGHT_SHORTAGE` / `WEIGHT_SURPLUS` | 2.5 / 1 | 覆盖需求（最高优先级） |
 | `PENALTY_UNEVEN_SPLIT` / `PENALTY_PAIRED_SPLIT` | 30 / 2 | pod 落单 / 对半拆 |
-| `PERF_WEIGHT` | 0.25 | 业绩排名决定班次长短（主信号） |
+| `PERF_WEIGHT` | 0.25 | 业绩排名决定"哪个时长类别"（主信号） |
+| `WINDOW_WEIGHT` | 0.05 | 业绩排名决定"同时长选哪个窗口"（比 `PERF_WEIGHT` 更细、更弱） |
 | `PREF_WEIGHT` | 0.10 | 人工偏好（弱微调；设 0 忽略） |
 | `THEO_SHARE` | 0.80 | score 里 Theo 占比 |
 
-`PERF_WEIGHT` / `PREF_WEIGHT` 可用命令行 `--perf-weight` / `--pref-weight` 覆盖。
+优先级从高到低：覆盖需求 > pod 落单/对半 > 时长类别排名 (`PERF_WEIGHT`) >
+同时长窗口排名 (`WINDOW_WEIGHT`) ≈ 人工偏好 (`PREF_WEIGHT`)。
+
+`PERF_WEIGHT` / `PREF_WEIGHT` / `WINDOW_WEIGHT` 可用命令行
+`--perf-weight` / `--pref-weight` / `--window-weight` 覆盖。
 
 ## 开发
 
 ```bash
 uv sync --extra dev
-uv run pytest                # 27 个测试；test_model.py 需要 ortools，缺则自动跳过
+uv run pytest                # 35 个测试；test_model.py 需要 ortools，缺则自动跳过
+                              # (test_window.py 是纯函数测试，不需要 ortools)
 ```
 
 ## 目录
@@ -152,7 +167,7 @@ src/shift_optimizer/
   scoring.py    业绩指标 -> 0..1 综合评分 + 排名
   io_excel.py   读配置/需求、写结果、按天组装可用台
                 TableInfo / FleetConfig / DayDemand / DayFleet / DayResult / build_day_fleet
-  model.py      CP-SAT 建模 + 逐日求解；pod_penalty_schedule
+  model.py      CP-SAT 建模 + 逐日求解；pod_penalty_schedule, window_desirability
   cli.py        命令行入口
 scripts/make_templates.py   生成示例 Excel
 data/           示例输入

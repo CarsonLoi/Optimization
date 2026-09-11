@@ -6,7 +6,8 @@
   + WEIGHT_SURPLUS  * Σ 每小时过剩
   + Σ pod 拆分罚分                       （AddElement 查表，任意 pod 大小都成立）
   + PREF_WEIGHT     * Σ 人工偏好偏离罚分  （仅对填了 preferred_open_hours 的台）
-  - PERF_WEIGHT     * Σ score[台] * 该台开机小时数      （业绩奖励项）
+  - PERF_WEIGHT     * Σ score[台] * 该台开机小时数            （业绩奖励项：决定"哪个时长"）
+  - WINDOW_WEIGHT   * Σ score[台] * desirability[该台选的班次] （窗口奖励项：决定"同时长选哪个窗口"）
 
 硬约束:
   * 每张台恰好一个班次
@@ -19,6 +20,14 @@
 在这些约束下，  - Σ score[台] * 开机小时数  这一项会把"开机小时数"尽量
 堆到 score 最高的台上（排序不等式）——于是高业绩的台优先拿到长班次。
 新台无历史 -> score 取当天有历史台的中位数（既不吃亏也不占便宜）。
+
+窗口奖励项如何"决定同时长选哪个窗口"
+------------------------------------
+16h 有 C/E 两个窗口、8h 有 H/L/J/N 四个窗口，时长相同但覆盖的钟点不同。
+desirability[班次] = 该班次覆盖的小时里，当天需求之和，在【同一时长类别内】
+做 min-max 归一化到 0..1（24h 只有 A、关闭只有 G，没得选，恒为 0）。
+当覆盖约束允许"同时长、选哪个窗口都一样"时，这一项把需求覆盖更多的窗口
+让给 score 更高的台；覆盖不是真的无所谓时，覆盖项（权重大得多）仍然说了算。
 """
 
 from __future__ import annotations
@@ -27,9 +36,28 @@ from .config import (
     GAMING_DAY_START_HOUR, HOURS_PER_DAY, MAX_DISTINCT_SHIFTS_PER_POD, NUM_SHIFTS,
     PENALTY_BY_PREF_AND_CATEGORY, PENALTY_PAIRED_SPLIT, PENALTY_UNEVEN_SPLIT,
     PERF_WEIGHT, PREF_WEIGHT, SHIFT_CATEGORY, SHIFT_CODES, SHIFT_COVERS_HOUR,
-    SHIFT_OPEN_HOURS, WEIGHT_SHORTAGE, WEIGHT_SURPLUS,
+    SHIFT_OPEN_HOURS, WEIGHT_SHORTAGE, WEIGHT_SURPLUS, WINDOW_WEIGHT,
 )
 from .io_excel import DayDemand, DayFleet, DayResult
+from .scoring import normalize
+
+
+def window_desirability(demand: list[int]) -> list[float]:
+    """
+    每个班次在【自己所属时长类别】内的"窗口吸引力"，0..1。
+    = 该班次覆盖的小时里，当天需求之和，在同类别班次间 min-max 归一化。
+    类别里只有一个班次的（24h 的 A、关闭的 G）没有可比对象，恒为 0。
+    """
+    demand_covered = [sum(demand[h] * int(SHIFT_COVERS_HOUR[s, h]) for h in range(HOURS_PER_DAY))
+                      for s in range(NUM_SHIFTS)]
+    result = [0.0] * NUM_SHIFTS
+    for category in set(SHIFT_CATEGORY):
+        members = [s for s in range(NUM_SHIFTS) if SHIFT_CATEGORY[s] == category]
+        if len(members) < 2:
+            continue                                         # 没得选，desirability 恒 0
+        for s, v in zip(members, normalize([demand_covered[s] for s in members])):
+            result[s] = v
+    return result
 
 
 def pod_penalty_schedule(pod_size: int) -> list[int]:
@@ -54,7 +82,8 @@ def pod_penalty_schedule(pod_size: int) -> list[int]:
 def solve_day(day: DayDemand, dayf: DayFleet,
               time_limit_s: float,
               perf_weight: float = PERF_WEIGHT,
-              pref_weight: float = PREF_WEIGHT) -> DayResult:
+              pref_weight: float = PREF_WEIGHT,
+              window_weight: float = WINDOW_WEIGHT) -> DayResult:
     from ortools.sat.python import cp_model
 
     T = dayf.num_tables
@@ -129,12 +158,17 @@ def solve_day(day: DayDemand, dayf: DayFleet,
 
     perf_reward = sum(dayf.score[t] * open_hours[t] for t in range(T))
 
+    desir = window_desirability(demand)
+    window_reward = sum(dayf.score[t] * desir[s] * assign[t, s]
+                        for t in range(T) for s in range(NUM_SHIFTS))
+
     model.Minimize(
         WEIGHT_SHORTAGE * sum(hourly_shortage)
         + WEIGHT_SURPLUS * sum(hourly_surplus)
         + sum(pod_penalty_terms)
         + pref_weight * sum(coeff * charge for charge, coeff in pref_penalty_terms)
         - perf_weight * perf_reward
+        - window_weight * window_reward
     )
 
     # ---- 求解 ----
@@ -158,6 +192,7 @@ def solve_day(day: DayDemand, dayf: DayFleet,
         'has_history': dayf.has_history[t],
         'preferred_open_hours': dayf.pref[t],
         'shift': SHIFT_CODES[s], 'shift_open_hours': SHIFT_OPEN_HOURS[s],
+        'window_desirability': round(desir[s], 4),
     } for t, s in sorted(chosen.items(), key=lambda kv: dayf.rank[kv[0]])]
 
     result.realized_theo = round(sum((dayf.theo[t] or 0.0) * SHIFT_OPEN_HOURS[s]

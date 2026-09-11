@@ -70,6 +70,15 @@ MAX_DISTINCT_SHIFTS_PER_POD = 2
 PERF_WEIGHT = 0.25
 THEO_SHARE  = 0.80          # score = THEO_SHARE*Theo_norm + (1-THEO_SHARE)*Hands_norm
 
+# 同长度内的"窗口"奖励：目标里减去  WINDOW_WEIGHT * Σ_台 score[台] * desirability[该台选的班次]
+#   desirability 只在【同一时长类别内】比较、且当天现算（见 model.py 的 _window_desirability）：
+#   16h 里比 C 和 E 各覆盖了多少当天需求、8h 里比 H/L/J/N 各覆盖了多少，min-max 到 0..1。
+#   24h(只有 A)和关闭(只有 G)没有"选哪个窗口"这回事，desirability 恒为 0。
+#   效果：当覆盖需求允许【同一时长但不同窗口】之间二选一时，把需求覆盖更多的窗口给评分更高的台。
+#   权重比 PERF_WEIGHT 小一个量级 —— 这是同长度内的"细"排序，不应该反过来影响
+#   "选哪个时长类别"或覆盖本身的决定。设 0 关闭这项（只按覆盖挑窗口，如旧版）。
+WINDOW_WEIGHT = 0.05
+
 # 人工偏好项：目标里加  PREF_WEIGHT * Σ 偏离罚分。
 #   现在业绩排名是决定班次长短的【主】信号，人工偏好只是【弱】微调，所以默认很小。
 #   想让 preferred_open_hours 起主导作用 -> 调大 --pref-weight（或调小 --perf-weight）。

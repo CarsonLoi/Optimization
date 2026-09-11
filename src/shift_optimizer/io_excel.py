@@ -338,7 +338,8 @@ def write_excel(out_path: str, results: list[DayResult], fleet: FleetConfig) -> 
         _df(fleet_rows, list(fleet_rows[0]) if fleet_rows else []).to_excel(
             xw, sheet_name='fleet', index=False)
         _df(schedule_rows, ['day', 'table', 'pod', 'rank', 'score', 'has_history',
-                            'preferred_open_hours', 'shift', 'shift_open_hours']).to_excel(
+                            'preferred_open_hours', 'shift', 'shift_open_hours',
+                            'window_desirability']).to_excel(
             xw, sheet_name='schedules', index=False)
         _df(coverage_rows, ['day', 'hour_index', 'clock', 'demand', 'capacity',
                             'tables_open', 'shortage', 'surplus']).to_excel(
