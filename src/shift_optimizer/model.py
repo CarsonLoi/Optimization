@@ -2,17 +2,29 @@
 建模 + 求解（每天独立一次，只用当天【可用】的台）。
 
 目标函数（最小化）:
-    WEIGHT_SHORTAGE * Σ 每小时缺口
-  + WEIGHT_SURPLUS  * Σ 每小时过剩
-  + Σ pod 拆分罚分                       （AddElement 查表，任意 pod 大小都成立）
-  + PREF_WEIGHT     * Σ 人工偏好偏离罚分  （仅对填了 preferred_open_hours 的台）
-  - PERF_WEIGHT     * Σ score[台] * 该台开机小时数            （业绩奖励项：决定"哪个时长"）
-  - WINDOW_WEIGHT   * Σ score[台] * desirability[该台选的班次] （窗口奖励项：决定"同时长选哪个窗口"）
+    WEIGHT_SHORTAGE     * Σ 每小时缺口
+  + WEIGHT_SURPLUS      * Σ 每小时过剩
+  + Σ pod 拆分基准罚分                       （AddElement 查表，任意 pod 大小都成立）
+  - SOFT_SPLIT_DISCOUNT * Σ pod "衔接得上"时退回的那部分罚分  （见下）
+  + PREF_WEIGHT         * Σ 人工偏好偏离罚分  （仅对填了 preferred_open_hours 的台）
+  - PERF_WEIGHT         * Σ score[台] * 该台开机小时数            （业绩奖励项：决定"哪个时长"）
+  - WINDOW_WEIGHT       * Σ score[台] * desirability[该台选的班次] （窗口奖励项：决定"同时长选哪个窗口"）
 
 硬约束:
   * 每张台恰好一个班次
   * 每个 pod 最多用 MAX_DISTINCT_SHIFTS_PER_POD 种班次
   * 每小时开台数 <= 当天 capacity
+
+pod 拆分罚分：公平性 + 衔接顺不顺
+----------------------------------
+pod_penalty_schedule(pod_size) 按"离这个 pod 大小下最公平的两段拆分还差多远"定基准罚分，
+不再默认"少数侧只有 1 张"就是最差情况——3 张台的 pod 唯一能做的拆分就是 1+2，
+那已经是 3 张台能做到的最公平拆分，不该跟 4 张台的 1+3 一样重罚（见函数注释）。
+
+在基准罚分之上，如果一个 pod 恰好拆成了 SOFT_SHIFT_PAIRS 里"共用一个开/关钟点"
+的那种班次组合（比如 H 12:00-20:00 接 L 20:00-04:00，交班干干净净、没有缝隙），
+就退回 SOFT_SPLIT_DISCOUNT 比例的罚分；两个班次的钟点完全对不上（比如 C 和 J），
+就不打折，按基准罚分全额计。
 
 业绩奖励项如何"决定谁上长班次"
 ------------------------------
@@ -36,7 +48,8 @@ from .config import (
     GAMING_DAY_START_HOUR, HOURS_PER_DAY, MAX_DISTINCT_SHIFTS_PER_POD, NUM_SHIFTS,
     PENALTY_BY_PREF_AND_CATEGORY, PENALTY_PAIRED_SPLIT, PENALTY_UNEVEN_SPLIT,
     PERF_WEIGHT, PREF_WEIGHT, SHIFT_CATEGORY, SHIFT_CODES, SHIFT_COVERS_HOUR,
-    SHIFT_OPEN_HOURS, WEIGHT_SHORTAGE, WEIGHT_SURPLUS, WINDOW_WEIGHT,
+    SHIFT_OPEN_HOURS, SOFT_SHIFT_PAIRS, SOFT_SPLIT_DISCOUNT, WEIGHT_SHORTAGE,
+    WEIGHT_SURPLUS, WINDOW_WEIGHT,
 )
 from .io_excel import DayDemand, DayFleet, DayResult
 from .scoring import normalize
@@ -62,20 +75,35 @@ def window_desirability(demand: list[int]) -> list[float]:
 
 def pod_penalty_schedule(pod_size: int) -> list[int]:
     """
-    pod 有 pod_size 张台。某班次上有 c 张台时该 (pod, 班次) 的罚分:
-        c == 0 或 c == pod_size            -> 0    （整组一起 / 整组都不在）
-        少数侧只有 1 张 (min(c, size-c)==1) -> PENALTY_UNEVEN_SPLIT   （落单）
-        少数侧 >= 2 张                       -> PENALTY_PAIRED_SPLIT   （对半拆）
-    pod_size == 4 时结果是 [0, 30, 2, 30, 0]，与旧脚本一致。
+    pod 有 pod_size 张台。某班次上有 c 张台时该 (pod, 班次) 的罚分。
+
+    按"离这个 pod 大小下最公平的两段拆分还差多远"算，而不是看少数侧是不是恰好 1 张：
+        diff(c)      = |c - (pod_size - c)|            两段的人数差
+        best_diff    = pod_size % 2                    这个大小下能做到的最小人数差
+                       （偶数台可以 1:1 对半分，奇数台最好也只能差 1，比如 3 张只能 1+2）
+        c == 0 / pod_size          -> 0                （整组一起，或整组都不在这个班次）
+        diff(c) == best_diff       -> PENALTY_PAIRED_SPLIT             （这个大小下已经最公平了）
+        diff(c) 每多 2（一步）      -> 再加 (PENALTY_UNEVEN_SPLIT - PENALTY_PAIRED_SPLIT)
+
+    pod_size == 4 时结果是 [0, 30, 2, 30, 0]，与旧脚本一致（1+3 罚 30，2+2 罚 2）。
+
+    这修掉了一个旧版本的偏差：3 张台的 pod 唯一可能的拆分是 1+2——那已经是 3 张台
+    能做到的最公平拆分了（差距只有 1，跟 4 张台的 2+2 地位相同），旧版本却按"少数
+    侧只有 1 张"把它当成最差的 1+3 来罚（30+30=60）。同理 2 张台唯一的拆分 1+1
+    其实是完全对半分（差距为 0），旧版本也误罚成了 30+30。现在两者都只罚
+    PENALTY_PAIRED_SPLIT（2+2=4），跟它们"已经没有更公平的拆法"这件事相称；
+    5 张、6 张、7 张台的结果不变或按同一把尺子合理延伸（见 tests/test_model.py）。
     """
+    best_diff = pod_size % 2
+    step = PENALTY_UNEVEN_SPLIT - PENALTY_PAIRED_SPLIT
     sched = []
     for c in range(pod_size + 1):
         if c == 0 or c == pod_size:
             sched.append(0)
-        elif min(c, pod_size - c) == 1:
-            sched.append(PENALTY_UNEVEN_SPLIT)
-        else:
-            sched.append(PENALTY_PAIRED_SPLIT)
+            continue
+        diff = abs(c - (pod_size - c))
+        excess_steps = (diff - best_diff) // 2      # 0 = 已经最公平；每 +1 表示更偏一档
+        sched.append(PENALTY_PAIRED_SPLIT + step * excess_steps)
     return sched
 
 
@@ -83,7 +111,8 @@ def solve_day(day: DayDemand, dayf: DayFleet,
               time_limit_s: float,
               perf_weight: float = PERF_WEIGHT,
               pref_weight: float = PREF_WEIGHT,
-              window_weight: float = WINDOW_WEIGHT) -> DayResult:
+              window_weight: float = WINDOW_WEIGHT,
+              soft_split_discount: float = SOFT_SPLIT_DISCOUNT) -> DayResult:
     from ortools.sat.python import cp_model
 
     T = dayf.num_tables
@@ -107,12 +136,19 @@ def solve_day(day: DayDemand, dayf: DayFleet,
                   for t in range(T)}
 
     # ---- 约束 A: pod 整齐度 ----
-    pod_penalty_terms = []
+    # 每个 pod 的拆分罚分先按 pod_penalty_schedule 算出"基准"（跟哪两个具体班次无关）。
+    # 如果这个 pod 恰好拆成了【共用一个开/关钟点】的两个班次（SOFT_SHIFT_PAIRS 里的一对，
+    # 比如 H+L 首尾相接），就退回 soft_split_discount 比例的罚分——同样是拆分，交班顺的
+    # 拆法比"完全对不上"的拆法罚得轻。
+    pod_penalty_terms = []      # 基准罚分（未打折），沿用旧版，始终计入
+    pod_discount_terms = []     # 命中"衔接得上"时可退回的那一部分（按 soft_split_discount 扣）
+    pod_is_soft_split = {}      # pod 名 -> 是否命中"衔接得上"（求解后读出来，写进输出表）
     for pod_name, members in dayf.pods.items():
         size = len(members)
         sched = pod_penalty_schedule(size)
         max_pen = max(sched) if sched else 0
         shift_used = []
+        pod_pens = []
         for s in range(NUM_SHIFTS):
             count = model.NewIntVar(0, size, f'pod_{pod_name}_{SHIFT_CODES[s]}_cnt')
             model.Add(count == sum(assign[t, s] for t in members))
@@ -120,12 +156,31 @@ def solve_day(day: DayDemand, dayf: DayFleet,
             pen = model.NewIntVar(0, max_pen, f'pod_{pod_name}_{SHIFT_CODES[s]}_pen')
             model.AddElement(count, sched, pen)
             pod_penalty_terms.append(pen)
+            pod_pens.append(pen)
 
             used = model.NewBoolVar(f'pod_{pod_name}_uses_{SHIFT_CODES[s]}')
             model.Add(count >= 1).OnlyEnforceIf(used)
             model.Add(count == 0).OnlyEnforceIf(used.Not())
             shift_used.append(used)
         model.Add(sum(shift_used) <= MAX_DISTINCT_SHIFTS_PER_POD)
+
+        # 这个 pod 实际用到的两个班次，是不是 SOFT_SHIFT_PAIRS 里衔接得上的那一对？
+        pair_flags = []
+        for s1, s2 in SOFT_SHIFT_PAIRS:
+            both = model.NewBoolVar(f'pod_{pod_name}_soft_{SHIFT_CODES[s1]}{SHIFT_CODES[s2]}')
+            model.AddBoolAnd([shift_used[s1], shift_used[s2]]).OnlyEnforceIf(both)
+            model.AddBoolOr([shift_used[s1].Not(), shift_used[s2].Not()]).OnlyEnforceIf(both.Not())
+            pair_flags.append(both)
+
+        is_soft_split = model.NewBoolVar(f'pod_{pod_name}_is_soft_split')
+        model.AddBoolOr(pair_flags).OnlyEnforceIf(is_soft_split)
+        model.AddBoolAnd([f.Not() for f in pair_flags]).OnlyEnforceIf(is_soft_split.Not())
+
+        discount_amount = model.NewIntVar(0, 2 * max_pen, f'pod_{pod_name}_discount_amt')
+        model.Add(discount_amount == sum(pod_pens)).OnlyEnforceIf(is_soft_split)
+        model.Add(discount_amount == 0).OnlyEnforceIf(is_soft_split.Not())
+        pod_discount_terms.append(discount_amount)
+        pod_is_soft_split[pod_name] = is_soft_split
 
     # ---- 约束 B: 人工偏好营业时长（仅对填了 pref 的台）----
     pref_penalty_terms = []                                  # list[(charge_bool, coeff)]
@@ -166,6 +221,7 @@ def solve_day(day: DayDemand, dayf: DayFleet,
         WEIGHT_SHORTAGE * sum(hourly_shortage)
         + WEIGHT_SURPLUS * sum(hourly_surplus)
         + sum(pod_penalty_terms)
+        - soft_split_discount * sum(pod_discount_terms)
         + pref_weight * sum(coeff * charge for charge, coeff in pref_penalty_terms)
         - perf_weight * perf_reward
         - window_weight * window_reward
@@ -186,6 +242,8 @@ def solve_day(day: DayDemand, dayf: DayFleet,
     chosen = {t: s for t in range(T) for s in range(NUM_SHIFTS)
               if solver.BooleanValue(assign[t, s])}
     result.schedule = {dayf.names[t]: SHIFT_CODES[s] for t, s in chosen.items()}
+    pod_soft_split = {name: bool(solver.BooleanValue(var))
+                      for name, var in pod_is_soft_split.items()}
     result.schedule_rows = [{
         'table': dayf.names[t], 'pod': dayf.pod[t],
         'rank': dayf.rank[t], 'score': round(dayf.score[t], 4),
@@ -193,6 +251,7 @@ def solve_day(day: DayDemand, dayf: DayFleet,
         'preferred_open_hours': dayf.pref[t],
         'shift': SHIFT_CODES[s], 'shift_open_hours': SHIFT_OPEN_HOURS[s],
         'window_desirability': round(desir[s], 4),
+        'pod_split_soft': pod_soft_split[dayf.pod[t]],
     } for t, s in sorted(chosen.items(), key=lambda kv: dayf.rank[kv[0]])]
 
     result.realized_theo = round(sum((dayf.theo[t] or 0.0) * SHIFT_OPEN_HOURS[s]

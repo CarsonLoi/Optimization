@@ -10,7 +10,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .config import DEFAULT_TIME_LIMIT_S, PERF_WEIGHT, PREF_WEIGHT, WINDOW_WEIGHT
+from .config import (
+    DEFAULT_TIME_LIMIT_S, PERF_WEIGHT, PREF_WEIGHT, SOFT_SPLIT_DISCOUNT, WINDOW_WEIGHT,
+)
 from .io_excel import DayResult, build_day_fleet, load_config, load_demand, write_excel
 from .model import solve_day
 
@@ -54,6 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help='人工偏好项权重（0 = 完全忽略 preferred_open_hours）')
     ap.add_argument('--window-weight', type=float, default=WINDOW_WEIGHT,
                     help='同时长内窗口奖励权重（0 = 同时长的窗口只按覆盖挑，不看评分）')
+    ap.add_argument('--soft-split-discount', type=float, default=SOFT_SPLIT_DISCOUNT,
+                    help='pod 拆成"衔接得上"的两个班次时的罚分折扣比例（0 = 不打折，1 = 完全免罚）')
     return ap
 
 
@@ -69,15 +73,16 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"读到 {fleet.num_tables} 张台（master），{len(days)} 天。"
           f"{'按 available_from/to 逐日过滤。' if fleet.has_availability_window else ''}")
-    print(f"权重: shortage/surplus 固定, perf={args.perf_weight}, "
-          f"pref={args.pref_weight}, window={args.window_weight}")
+    print(f"权重: shortage/surplus 固定, perf={args.perf_weight}, pref={args.pref_weight}, "
+          f"window={args.window_weight}, soft_split_discount={args.soft_split_discount}")
 
     results = []
     for day in days:
         dayf = build_day_fleet(fleet, day)
         res = solve_day(day, dayf, args.time_limit,
                         perf_weight=args.perf_weight, pref_weight=args.pref_weight,
-                        window_weight=args.window_weight)
+                        window_weight=args.window_weight,
+                        soft_split_discount=args.soft_split_discount)
         _print_day(res)
         results.append(res)
 

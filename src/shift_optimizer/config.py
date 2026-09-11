@@ -45,6 +45,42 @@ def bucket_hours(open_hours: int) -> int:
 SHIFT_OPEN_HOURS = [int(row.sum()) for row in SHIFT_COVERS_HOUR]          # 例: [0,24,16,16,8,8,8,8]
 SHIFT_CATEGORY   = [CATEGORY_INDEX[bucket_hours(h)] for h in SHIFT_OPEN_HOURS]
 
+# --- 每个班次的开/关钟点（用来判断两个班次是不是"衔接得上"）------------
+#   (start_clock, end_clock)，取值 0..23；G(全天关闭) 没有钟点，记 None。
+#   A(24h) 的开=关=07:00（转一圈回到原点）。
+def _shift_boundaries(shift: int) -> tuple[int, int] | None:
+    ones = [h for h in range(HOURS_PER_DAY) if SHIFT_COVERS_HOUR[shift, h]]
+    if not ones:
+        return None
+    start_clock = (GAMING_DAY_START_HOUR + ones[0]) % 24
+    end_clock = (GAMING_DAY_START_HOUR + ones[-1] + 1) % 24
+    return (start_clock, end_clock)
+
+
+SHIFT_BOUNDARIES = [_shift_boundaries(s) for s in range(NUM_SHIFTS)]
+
+
+def _shares_a_boundary(s1: int, s2: int) -> bool:
+    """
+    两个班次的"开钟点/关钟点"集合是否有交集——包含两种"衔接得上"的情形:
+      * 同时开始 或 同时结束（比如 C 和 H 都是 12:00 开始）；
+      * 一个的收尾正好是另一个的开始，首尾相接、没有缝隙（比如 H 20:00 收尾，
+        L 正好 20:00 接上；两者若各拆给一半台，交班干净利落）。
+    """
+    b1, b2 = SHIFT_BOUNDARIES[s1], SHIFT_BOUNDARIES[s2]
+    if b1 is None or b2 is None:                 # 一个关闭(G)，没有钟点可比，一律算"接不上"
+        return False
+    return bool({b1[0], b1[1]} & {b2[0], b2[1]})
+
+
+# 组内共用开钟点或关钟点的班次对（同长度或不同长度都算，只看钟点）。
+# 用当前班次表算出来正好是：
+#   A-E（同 07:00 收尾）、A-N（同 07:00 收尾）、C-H（同 12:00 开始）、C-L（同 04:00 收尾）、
+#   E-J（同 15:00 开始）、E-N（同 07:00 收尾）、H-L（12:00-20:00 接 20:00-04:00，正好衔接）、
+#   J-N（15:00-23:00 接 23:00-07:00，正好衔接）
+SOFT_SHIFT_PAIRS = [(s1, s2) for s1 in range(NUM_SHIFTS) for s2 in range(s1 + 1, NUM_SHIFTS)
+                    if _shares_a_boundary(s1, s2)]
+
 # --- 偏好营业时长的偏离罚分（沿用旧模型）------------------------------
 # 内层 key = 实际落到的类别编号；净效果 = 惩罚"类别距离"。
 PENALTY_BY_PREF_AND_CATEGORY = {
@@ -59,9 +95,15 @@ VALID_PREF_HOURS = set(PENALTY_BY_PREF_AND_CATEGORY)     # {0, 8, 16, 24}
 # 优先级（从高到低）：满足需求  >  按业绩排名分配长班次  >  贴近人工偏好
 WEIGHT_SHORTAGE      = 2.5   # 缺 1 个"台·小时"罚 2.5（先保覆盖）
 WEIGHT_SURPLUS       = 1.0   # 多 1 个"台·小时"罚 1
-PENALTY_UNEVEN_SPLIT = 30    # pod 里某班次落单（少数侧只有 1 张台）
-PENALTY_PAIRED_SPLIT = 2     # pod 里某班次是"对半"拆的一侧
+PENALTY_UNEVEN_SPLIT = 30    # pod 拆分明显偏向一边时的基准罚分（见 model.pod_penalty_schedule）
+PENALTY_PAIRED_SPLIT = 2     # pod 拆成该 pod 大小下"最公平"那种两段拆分时的基准罚分
 MAX_DISTINCT_SHIFTS_PER_POD = 2
+
+# 一个 pod 拆成 2 个班次时，如果这 2 个班次【共用一个开钟点或关钟点】——
+# 例如 H(12:00-20:00) 接 L(20:00-04:00)，交接顺、不留缝隙、不需要额外协调——
+# 就把该 pod 当次拆分的罚分打个折；两个班次开关钟点【完全对不上】则不打折，按基准罚分。
+# 折扣是比例，不是新的绝对值：0.5 = 打对折，0 = 不打折（等于关掉这条规则）。
+SOFT_SPLIT_DISCOUNT = 0.5
 
 # 业绩奖励项：目标里减去  PERF_WEIGHT * Σ_台 score[台] * (该台开机小时数)
 #   score 已归一化到 0..1（见 scoring.py），所以每张台一天的最大奖励 ≈ PERF_WEIGHT * 24。

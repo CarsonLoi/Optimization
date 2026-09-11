@@ -339,7 +339,7 @@ def write_excel(out_path: str, results: list[DayResult], fleet: FleetConfig) -> 
             xw, sheet_name='fleet', index=False)
         _df(schedule_rows, ['day', 'table', 'pod', 'rank', 'score', 'has_history',
                             'preferred_open_hours', 'shift', 'shift_open_hours',
-                            'window_desirability']).to_excel(
+                            'window_desirability', 'pod_split_soft']).to_excel(
             xw, sheet_name='schedules', index=False)
         _df(coverage_rows, ['day', 'hour_index', 'clock', 'demand', 'capacity',
                             'tables_open', 'shortage', 'surplus']).to_excel(

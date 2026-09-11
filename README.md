@@ -4,8 +4,10 @@
 
 每张台每天分配【一个班次】，在满足小时需求、不超过 capacity 的前提下：
 - 尽量覆盖每小时需求（缺口比过剩罚得重）；
-- 按业绩排名把【长班次】分给高价值的台（Theo 为主、Patron hands 为辅）；
-- 保持同一 pod 内排班整齐（整组同班次最好；2+2 可接受；落单强烈避免；一个 pod 最多 2 种班次）；
+- 按业绩排名把【长班次】、以及同长度里【需求更多的窗口】分给高价值的台（Theo 为主、Patron hands 为辅）；
+- 保持同一 pod 内排班整齐——整组同班次最好；拆成 2 个班次时，尽量拆成【这个 pod 大小下最公平】
+  的两段（大小不同的 pod 标准不同，见下）；拆成的两个班次如果【首尾正好衔接】（交班顺、无缝隙），
+  罚分打折；一个 pod 最多用 2 种班次；
 - 轻微贴近人工填写的 `preferred_open_hours`（次要信号）。
 
 ## 安装
@@ -40,6 +42,7 @@ uv run shift-optimizer                      # 用默认路径跑
 uv run shift-optimizer --config data/config.xlsx --demand data/demand.xlsx --out out.xlsx
 uv run shift-optimizer --perf-weight 0.4 --pref-weight 0   # 完全按业绩、忽略人工偏好
 uv run shift-optimizer --window-weight 0                    # 同时长内的窗口只按覆盖挑，不看评分
+uv run shift-optimizer --soft-split-discount 0               # 拆分罚分不因"衔接得上"打折，退回基准罚分
 uv run shift-optimizer --help
 ```
 
@@ -124,46 +127,75 @@ master 清单，一般一张台一行（同名多行见下方）。列名不分�
 |---|---|
 | `summary` | 每天一行：status、可用台数、capacity、objective、总缺口、总过剩、实现 Theo、实现 hands |
 | `fleet` | master 台清单：pod、偏好、Theo、hands、has_history、available_from/to |
-| `schedules` | 长表：`day, table, pod, rank, score, has_history, preferred_open_hours, shift, shift_open_hours, window_desirability` |
+| `schedules` | 长表：`day, table, pod, rank, score, has_history, preferred_open_hours, shift, shift_open_hours, window_desirability, pod_split_soft` |
 | `coverage` | 逐日逐小时：`demand, capacity, tables_open, shortage, surplus` |
+
+## Pod 拆分：公平性 + 衔接顺不顺
+
+一个 pod 分成 2 个班次时，两件事各算各的罚分：
+
+**1. 这个大小的 pod 能拆得多公平。** 不再简单地看"少数侧是不是只有 1 张"——按跟
+"这个 pod 大小下最公平的两段拆分"还差多远来算（`model.pod_penalty_schedule`）：
+
+| pod 大小 | 最公平的拆法（人数差） | 该拆法的罚分 | 更偏的拆法 |
+|---|---|---|---|
+| 2 | 1+1（差 0） | `PENALTY_PAIRED_SPLIT` (2) | — |
+| 3 | 1+2（差 1，3 张台能做到的最好） | `PENALTY_PAIRED_SPLIT` (2) | — |
+| 4 | 2+2（差 0） | `PENALTY_PAIRED_SPLIT` (2) | 1+3（差 2）→ `PENALTY_UNEVEN_SPLIT` (30) |
+| 5 | 2+3（差 1） | `PENALTY_PAIRED_SPLIT` (2) | 1+4（差 3）→ `PENALTY_UNEVEN_SPLIT` (30) |
+| 6 | 3+3（差 0） | `PENALTY_PAIRED_SPLIT` (2) | 2+4（差 2）→30；1+5（差 4）→ 更狠（58） |
+
+旧版本把"少数侧只有 1 张"一律当成最差情况，这对 2、3 张台的 pod 不公平——它们唯一
+能做的拆法（1+1、1+2）本来就是那个大小下最公平的拆法，不该跟 4 张台的 1+3 一样重罚。
+现在按"跟最公平差多远"分档，4/5 张台 pod 的结果和以前完全一样，2/3 张台的被修正，
+更大的 pod 按同一把尺子合理延伸。
+
+**2. 拆成的两个班次首尾接不接得上。** 如果一个 pod 恰好拆成了两个【共用一个开钟点
+或关钟点】的班次——比如 H(12:00-20:00) 接 L(20:00-04:00)，一个收工另一个正好接班，
+中间没有缝隙，交班干净——这次拆分的罚分打 `SOFT_SPLIT_DISCOUNT` 折（默认 0.5，即半价）。
+两个班次的钟点完全对不上（比如 C 和 J）就不打折，按上面第 1 点算出的基准罚分全额计。
+当前班次表算出来的"衔接得上"组合：`A-E`、`A-N`、`C-H`、`C-L`、`E-J`、`E-N`、`H-L`、`J-N`
+（源码见 `config.SOFT_SHIFT_PAIRS`；`schedules` 表的 `pod_split_soft` 列会标出当天每个
+pod 的拆分有没有命中）。
 
 ## 权重与优先级
 
 目标函数（最小化）：
 
 ```
-2.5·Σ缺口  +  1·Σ过剩  +  Σ pod拆分罚分  +  PREF_WEIGHT·Σ偏好偏离
-  −  PERF_WEIGHT·Σ(score·开机小时)  −  WINDOW_WEIGHT·Σ(score·同时长窗口吸引力)
+2.5·Σ缺口  +  1·Σ过剩  +  Σ pod拆分基准罚分  −  SOFT_SPLIT_DISCOUNT·Σ(衔接得上时可退的部分)
+  +  PREF_WEIGHT·Σ偏好偏离  −  PERF_WEIGHT·Σ(score·开机小时)  −  WINDOW_WEIGHT·Σ(score·同时长窗口吸引力)
 ```
 
 | 常量 | 默认 | 作用 |
 |---|---|---|
 | `WEIGHT_SHORTAGE` / `WEIGHT_SURPLUS` | 2.5 / 1 | 覆盖需求（最高优先级） |
-| `PENALTY_UNEVEN_SPLIT` / `PENALTY_PAIRED_SPLIT` | 30 / 2 | pod 落单 / 对半拆 |
+| `PENALTY_UNEVEN_SPLIT` / `PENALTY_PAIRED_SPLIT` | 30 / 2 | pod 拆分明显偏一边 / 该大小下最公平的拆法 |
+| `SOFT_SPLIT_DISCOUNT` | 0.5 | 拆成的两个班次首尾衔接得上时，基准罚分打几折退回 |
 | `PERF_WEIGHT` | 0.25 | 业绩排名决定"哪个时长类别"（主信号） |
 | `WINDOW_WEIGHT` | 0.05 | 业绩排名决定"同时长选哪个窗口"（比 `PERF_WEIGHT` 更细、更弱） |
 | `PREF_WEIGHT` | 0.10 | 人工偏好（弱微调；设 0 忽略） |
 | `THEO_SHARE` | 0.80 | score 里 Theo 占比 |
 
-优先级从高到低：覆盖需求 > pod 落单/对半 > 时长类别排名 (`PERF_WEIGHT`) >
-同时长窗口排名 (`WINDOW_WEIGHT`) ≈ 人工偏好 (`PREF_WEIGHT`)。
+优先级从高到低：覆盖需求 > pod 拆分公平性 > 时长类别排名 (`PERF_WEIGHT`) >
+同时长窗口排名 (`WINDOW_WEIGHT`) ≈ 人工偏好 (`PREF_WEIGHT`) ≈ 衔接折扣 (`SOFT_SPLIT_DISCOUNT`)。
 
-`PERF_WEIGHT` / `PREF_WEIGHT` / `WINDOW_WEIGHT` 可用命令行
-`--perf-weight` / `--pref-weight` / `--window-weight` 覆盖。
+`PERF_WEIGHT` / `PREF_WEIGHT` / `WINDOW_WEIGHT` / `SOFT_SPLIT_DISCOUNT` 可用命令行
+`--perf-weight` / `--pref-weight` / `--window-weight` / `--soft-split-discount` 覆盖。
 
 ## 开发
 
 ```bash
 uv sync --extra dev
-uv run pytest                # 35 个测试；test_model.py 需要 ortools，缺则自动跳过
-                              # (test_window.py 是纯函数测试，不需要 ortools)
+uv run pytest                # 43 个测试；test_model.py 需要 ortools，缺则自动跳过
+                              # (test_window.py / test_config.py 是纯函数测试，不需要 ortools)
 ```
 
 ## 目录
 
 ```
 src/shift_optimizer/
-  config.py     班次目录 / 时长类别 / 权重
+  config.py     班次目录 / 时长类别 / 开关钟点 / SOFT_SHIFT_PAIRS / 权重
   scoring.py    业绩指标 -> 0..1 综合评分 + 排名
   io_excel.py   读配置/需求、写结果、按天组装可用台
                 TableInfo / FleetConfig / DayDemand / DayFleet / DayResult / build_day_fleet
@@ -171,7 +203,7 @@ src/shift_optimizer/
   cli.py        命令行入口
 scripts/make_templates.py   生成示例 Excel
 data/           示例输入
-tests/          pytest
+tests/          pytest（test_window.py / test_config.py 不需要 ortools）
 ```
 
 模型细节（pod 约束、偏好罚分机制、07:00 约定的来龙去脉）见 git 历史里更早的带详细中文注释的单文件版本。
