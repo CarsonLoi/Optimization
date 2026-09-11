@@ -7,28 +7,19 @@ from shift_optimizer.scoring import performance_score, ranking
 pytest.importorskip("ortools")
 
 
-def test_pod_penalty_schedule_size4_matches_original():
-    assert pod_penalty_schedule(4) == [0, 30, 2, 30, 0]
+def test_pod_penalty_schedule_only_punishes_avoidable_loneliness():
+    # 只罚"1 张台孤零零落在另一边、且本可避免"（min(c,size-c)==1 且 size>=4）；
+    # 只要没有台落单，不管拆成几比几都不罚。
+    assert pod_penalty_schedule(4) == [0, 30, 0, 30, 0]        # 1+3 罚；2+2 不罚
+    assert pod_penalty_schedule(5) == [0, 30, 0, 0, 30, 0]     # 1+4 罚；2+3 不罚
+    assert pod_penalty_schedule(6) == [0, 30, 0, 0, 0, 30, 0]  # 只罚 1+5；2+4、3+3 都不罚
 
 
-def test_pod_penalty_schedule_size5_unchanged():
-    assert pod_penalty_schedule(5) == [0, 30, 2, 2, 30, 0]
-
-
-def test_pod_penalty_schedule_fairness_fix_for_odd_and_small_pods():
-    # 2 张台唯一的拆法 1+1 其实是完全对半（差距 0）——只该罚"对半"那一档，不是"落单"
-    assert pod_penalty_schedule(2) == [0, 2, 0]
-    # 3 张台唯一的拆法 1+2 已经是 3 张台能做到的最公平拆分（差距 1）——同样只罚"对半"那一档，
-    # 不该跟 4 张台的 1+3（差距 2，真的偏）一样重罚
-    assert pod_penalty_schedule(3) == [0, 2, 2, 0]
+def test_pod_penalty_schedule_small_pods_never_punished():
+    # 1/2/3 张台的 pod：落单是没法避免的（唯一能做的拆法本身就带着"少数侧=1"），不该罚
     assert pod_penalty_schedule(1) == [0, 0]
-
-
-def test_pod_penalty_schedule_scales_with_size():
-    # 6 张台：3+3(差0,最公平)=2；2+4(差2)=跟 4-pod 的最差档同分=30；1+5(差4)=比 30 更狠
-    assert pod_penalty_schedule(6) == [0, 58, 30, 2, 30, 58, 0]
-    # 7 张台：3+4(差1,最公平)=2；2+5(差3)=30；1+6(差5)=58
-    assert pod_penalty_schedule(7) == [0, 58, 30, 2, 2, 30, 58, 0]
+    assert pod_penalty_schedule(2) == [0, 0, 0]     # 唯一拆法 1+1，其实是完全对半
+    assert pod_penalty_schedule(3) == [0, 0, 0, 0]  # 唯一拆法 1+2，3 张台能做到的最公平拆分
 
 
 def _dayfleet(names, pod, pref, theo, hands):
@@ -113,13 +104,12 @@ def test_window_weight_zero_leaves_window_choice_to_coverage_only():
     assert {res.schedule['LOW'], res.schedule['HIGH']} == {'H', 'L'}
 
 
-def test_soft_split_discount_refunds_pod_penalty_for_compatible_pair():
-    # 一个 4 张台的 pod，需求形状让它 2+2 拆最划算，覆盖成本相同的候选拆法里正好有
-    # H(12:00-20:00)+L(20:00-04:00)——两者首尾相接，是 SOFT_SHIFT_PAIRS 里的一对，
-    # 同时也有覆盖成本相同但配不上钟点的候选（比如全押 16h 的 C + 另外两张关闭）。
-    # 折扣=0 时这些候选打平（都是 4 分的基准拆分罚分）；折扣拉到 1.0 后，
-    # 只有 H+L 能把这 4 分整个退回去，变成严格最优，逼着模型选它。
-    demand = [0] * 5 + [2] * 8 + [2] * 8 + [0] * 3
+def test_soft_split_discount_can_make_a_lonely_soft_split_worth_it():
+    # 一个 4 张台的 pod。需求形状是: H 的窗口(idx5..12)要 1 张台，L 的窗口(idx13..20)要 3 张台。
+    # 折扣关着时，"1 张落单"要付 30 分基准罚分，模型宁可选一个 2+2（比如 C+L，覆盖没那么
+    # 精确但不落单）；折扣拉到 1.0 后，H+L 这个"1+3 但完全贴合需求、又衔接得上"的拆法
+    # 把 30 分基准罚分整个退掉，变成比任何 2+2 都便宜，模型应该换过去。
+    demand = [0] * 5 + [1] * 8 + [3] * 8 + [0] * 3
     assert len(demand) == 24
     dayf = _dayfleet(names=[f'T{i}' for i in range(4)], pod=['P'] * 4, pref=[None] * 4,
                      theo=[100.0] * 4, hands=[50.0] * 4)
@@ -133,12 +123,15 @@ def test_soft_split_discount_refunds_pod_penalty_for_compatible_pair():
                               soft_split_discount=1.0)
 
     assert no_discount.status in ('OPTIMAL', 'FEASIBLE')
-    assert no_discount.objective == pytest.approx(4.0)     # 基准 2+2 拆分罚分，折扣关着不退
+    assert 'H' not in no_discount.schedule.values() or 'L' not in no_discount.schedule.values() \
+        or sorted(no_discount.schedule.values()) != ['H', 'L', 'L', 'L']   # 折扣关着，不该选 1+3
 
     assert full_discount.status in ('OPTIMAL', 'FEASIBLE')
-    assert sorted(full_discount.schedule.values()) == ['H', 'H', 'L', 'L']
+    assert sorted(full_discount.schedule.values()) == ['H', 'L', 'L', 'L']  # 折扣打开，换成 1+3
     assert all(row['pod_split_soft'] for row in full_discount.schedule_rows)
-    assert full_discount.objective == pytest.approx(0.0)   # 4 分基准罚分被 1.0 折扣整个退回
+
+    # 打开折扣让模型换到一个覆盖完全贴合需求的拆法，总分不该比关着折扣更差
+    assert full_discount.objective < no_discount.objective
 
 
 def test_soft_split_discount_does_not_apply_to_a_mismatched_pair():

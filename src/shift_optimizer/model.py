@@ -15,13 +15,15 @@
   * 每个 pod 最多用 MAX_DISTINCT_SHIFTS_PER_POD 种班次
   * 每小时开台数 <= 当天 capacity
 
-pod 拆分罚分：公平性 + 衔接顺不顺
-----------------------------------
-pod_penalty_schedule(pod_size) 按"离这个 pod 大小下最公平的两段拆分还差多远"定基准罚分，
-不再默认"少数侧只有 1 张"就是最差情况——3 张台的 pod 唯一能做的拆分就是 1+2，
-那已经是 3 张台能做到的最公平拆分，不该跟 4 张台的 1+3 一样重罚（见函数注释）。
+pod 拆分罚分：只罚"可以避免的落单" + 衔接顺不顺
+--------------------------------------------------
+pod_penalty_schedule(pod_size) 只罚"1 张台孤零零落在另一个班次上，而这本来可以
+避免"这一种情况（min(c, pod_size-c) == 1 且 pod_size >= 4）；只要没有台落单
+（少数侧 >= 2 张），不管拆成几比几都不罚——6 张台的 pod 拆成 2+4 或 3+3 都完全
+不罚，只有 1+5 才罚。pod_size <= 3 时任何拆分都不罚，因为落单在那个大小下根本
+没法避免（见函数注释）。
 
-在基准罚分之上，如果一个 pod 恰好拆成了 SOFT_SHIFT_PAIRS 里"共用一个开/关钟点"
+在这基础上，如果一个 pod 恰好拆成了 SOFT_SHIFT_PAIRS 里"共用一个开/关钟点"
 的那种班次组合（比如 H 12:00-20:00 接 L 20:00-04:00，交班干干净净、没有缝隙），
 就退回 SOFT_SPLIT_DISCOUNT 比例的罚分；两个班次的钟点完全对不上（比如 C 和 J），
 就不打折，按基准罚分全额计。
@@ -46,7 +48,7 @@ from __future__ import annotations
 
 from .config import (
     GAMING_DAY_START_HOUR, HOURS_PER_DAY, MAX_DISTINCT_SHIFTS_PER_POD, NUM_SHIFTS,
-    PENALTY_BY_PREF_AND_CATEGORY, PENALTY_PAIRED_SPLIT, PENALTY_UNEVEN_SPLIT,
+    PENALTY_BY_PREF_AND_CATEGORY, PENALTY_UNEVEN_SPLIT,
     PERF_WEIGHT, PREF_WEIGHT, SHIFT_CATEGORY, SHIFT_CODES, SHIFT_COVERS_HOUR,
     SHIFT_OPEN_HOURS, SOFT_SHIFT_PAIRS, SOFT_SPLIT_DISCOUNT, WEIGHT_SHORTAGE,
     WEIGHT_SURPLUS, WINDOW_WEIGHT,
@@ -77,33 +79,28 @@ def pod_penalty_schedule(pod_size: int) -> list[int]:
     """
     pod 有 pod_size 张台。某班次上有 c 张台时该 (pod, 班次) 的罚分。
 
-    按"离这个 pod 大小下最公平的两段拆分还差多远"算，而不是看少数侧是不是恰好 1 张：
-        diff(c)      = |c - (pod_size - c)|            两段的人数差
-        best_diff    = pod_size % 2                    这个大小下能做到的最小人数差
-                       （偶数台可以 1:1 对半分，奇数台最好也只能差 1，比如 3 张只能 1+2）
-        c == 0 / pod_size          -> 0                （整组一起，或整组都不在这个班次）
-        diff(c) == best_diff       -> PENALTY_PAIRED_SPLIT             （这个大小下已经最公平了）
-        diff(c) 每多 2（一步）      -> 再加 (PENALTY_UNEVEN_SPLIT - PENALTY_PAIRED_SPLIT)
+    只罚"把 1 张台孤零零地落在别的班次上，而这本来是可以避免的"这一种情况；
+    只要没有台落单（少数侧 >= 2 张），不管拆成几比几都不罚：
+        c == 0 / pod_size                     -> 0   （整组一起，或整组都不在这个班次）
+        min(c, pod_size-c) == 1 且 pod_size>=4 -> PENALTY_UNEVEN_SPLIT   （真落单，且本可避免）
+        其余（min(c,pod_size-c) >= 2，或 pod_size<=3）-> 0
 
-    pod_size == 4 时结果是 [0, 30, 2, 30, 0]，与旧脚本一致（1+3 罚 30，2+2 罚 2）。
+    pod_size <= 3 时任何拆分都不罚：1/2 张台没有"另一半"可言，3 张台唯一能做的拆分
+    (1+2) 本身就是 3 张台能做到的最公平拆分（min=1，但没有 min>=2 的替代方案），
+    落单是没法避免的，不该罚。pod_size >= 4 起，min==1 就是可以避免的落单
+    （比如 6 张台本可以 2+4 或 3+3，1+5 是自己选的），才罚。
 
-    这修掉了一个旧版本的偏差：3 张台的 pod 唯一可能的拆分是 1+2——那已经是 3 张台
-    能做到的最公平拆分了（差距只有 1，跟 4 张台的 2+2 地位相同），旧版本却按"少数
-    侧只有 1 张"把它当成最差的 1+3 来罚（30+30=60）。同理 2 张台唯一的拆分 1+1
-    其实是完全对半分（差距为 0），旧版本也误罚成了 30+30。现在两者都只罚
-    PENALTY_PAIRED_SPLIT（2+2=4），跟它们"已经没有更公平的拆法"这件事相称；
-    5 张、6 张、7 张台的结果不变或按同一把尺子合理延伸（见 tests/test_model.py）。
+    例：pod_size=4 -> [0,30,0,30,0]（只罚 1+3，2+2 完全不罚）；
+        pod_size=6 -> [0,30,0,0,0,30,0]（只罚 1+5，2+4、3+3 都不罚）。
     """
-    best_diff = pod_size % 2
-    step = PENALTY_UNEVEN_SPLIT - PENALTY_PAIRED_SPLIT
     sched = []
     for c in range(pod_size + 1):
         if c == 0 or c == pod_size:
             sched.append(0)
-            continue
-        diff = abs(c - (pod_size - c))
-        excess_steps = (diff - best_diff) // 2      # 0 = 已经最公平；每 +1 表示更偏一档
-        sched.append(PENALTY_PAIRED_SPLIT + step * excess_steps)
+        elif min(c, pod_size - c) == 1 and pod_size >= 4:
+            sched.append(PENALTY_UNEVEN_SPLIT)
+        else:
+            sched.append(0)
     return sched
 
 

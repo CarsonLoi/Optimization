@@ -95,8 +95,9 @@ VALID_PREF_HOURS = set(PENALTY_BY_PREF_AND_CATEGORY)     # {0, 8, 16, 24}
 # 优先级（从高到低）：满足需求  >  按业绩排名分配长班次  >  贴近人工偏好
 WEIGHT_SHORTAGE      = 2.5   # 缺 1 个"台·小时"罚 2.5（先保覆盖）
 WEIGHT_SURPLUS       = 1.0   # 多 1 个"台·小时"罚 1
-PENALTY_UNEVEN_SPLIT = 30    # pod 拆分明显偏向一边时的基准罚分（见 model.pod_penalty_schedule）
-PENALTY_PAIRED_SPLIT = 2     # pod 拆成该 pod 大小下"最公平"那种两段拆分时的基准罚分
+# pod 拆成 2 个班次时，只有"1 张台孤零零落在另一边、且本可避免"才罚这个数；
+# 只要没有台落单（少数侧 >= 2 张），不管比例多悬殊都不罚。见 model.pod_penalty_schedule。
+PENALTY_UNEVEN_SPLIT = 30
 MAX_DISTINCT_SHIFTS_PER_POD = 2
 
 # 一个 pod 拆成 2 个班次时，如果这 2 个班次【共用一个开钟点或关钟点】——
